@@ -107,11 +107,17 @@ public class PipeTransferTabletBatchReqV2 extends TPipeTransferReq {
             .computeIfAbsent(statement.getDatabaseName().orElse(null), k -> new ArrayList<>())
             .add((InsertTabletStatement) statement);
       } else if (statement instanceof InsertRowsStatement) {
+        // Use the parent statement's database name (set by V2 constructStatement()) as the
+        // grouping key for all children.  This prevents database-name loss for InsertRowsNode
+        // whose own targetPath is null — the V2 request carries the correct database name
+        // which constructStatement() sets on both the parent and each child, but falling back
+        // to the parent here guards against any edge case where a child's databaseName was
+        // not propagated.
+        final String parentDatabaseName = statement.getDatabaseName().orElse(null);
         for (final InsertRowStatement insertRowStatement :
             ((InsertRowsStatement) statement).getInsertRowStatementList()) {
           treeModelDatabaseInsertRowStatementMap
-              .computeIfAbsent(
-                  insertRowStatement.getDatabaseName().orElse(null), k -> new ArrayList<>())
+              .computeIfAbsent(parentDatabaseName, k -> new ArrayList<>())
               .add(insertRowStatement);
         }
       } else {
@@ -171,8 +177,22 @@ public class PipeTransferTabletBatchReqV2 extends TPipeTransferReq {
         databaseInsertRowStatementMap.entrySet()) {
       final InsertRowsStatement statement = new InsertRowsStatement();
       statement.setInsertRowStatementList(insertRows.getValue());
-      if (insertRows.getKey() != null) {
-        statement.setDatabaseName(insertRows.getKey());
+      String databaseName = insertRows.getKey();
+      if (databaseName == null) {
+        // Defensive fallback: derive the database name from the first child's device path.
+        // For tree model the database is always the first two segments of the path
+        // (e.g. "root._ha.cluster.node.n1" -> "root._ha").
+        final List<InsertRowStatement> rowStmts = insertRows.getValue();
+        if (rowStmts != null && !rowStmts.isEmpty()) {
+          final org.apache.iotdb.commons.path.PartialPath devicePath =
+              rowStmts.get(0).getDevicePath();
+          if (devicePath != null && devicePath.getNodes().length >= 2) {
+            databaseName = devicePath.getNodes()[0] + "." + devicePath.getNodes()[1];
+          }
+        }
+      }
+      if (databaseName != null) {
+        statement.setDatabaseName(databaseName);
       }
       statements.add(statement);
     }
@@ -185,8 +205,20 @@ public class PipeTransferTabletBatchReqV2 extends TPipeTransferReq {
         databaseInsertTabletStatementMap.entrySet()) {
       final InsertMultiTabletsStatement statement = new InsertMultiTabletsStatement();
       statement.setInsertTabletStatementList(insertTablets.getValue());
-      if (insertTablets.getKey() != null) {
-        statement.setDatabaseName(insertTablets.getKey());
+      String databaseName = insertTablets.getKey();
+      if (databaseName == null) {
+        // Defensive fallback: derive the database name from the first child's device path.
+        final List<InsertTabletStatement> tabletStmts = insertTablets.getValue();
+        if (tabletStmts != null && !tabletStmts.isEmpty()) {
+          final org.apache.iotdb.commons.path.PartialPath devicePath =
+              tabletStmts.get(0).getDevicePath();
+          if (devicePath != null && devicePath.getNodes().length >= 2) {
+            databaseName = devicePath.getNodes()[0] + "." + devicePath.getNodes()[1];
+          }
+        }
+      }
+      if (databaseName != null) {
+        statement.setDatabaseName(databaseName);
       }
       statements.add(statement);
     }

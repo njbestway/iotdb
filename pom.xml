@@ -50,6 +50,7 @@
         <module>library-udf</module>
         <module>external-service-impl</module>
         <module>architecture-test</module>
+        <module>iotdb-ha</module>
     </modules>
     <properties>
         <airlift-units.version>1.7</airlift-units.version>

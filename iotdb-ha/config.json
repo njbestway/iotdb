@@ -1,0 +1,41 @@
+{
+  "cluster": {
+    "id": "iotdb-prod-01"
+  },
+  "nodes": [
+    {
+      "id": "iotdb-a",
+      "rpc_url": "10.0.0.101:6667"
+    },
+    {
+      "id": "iotdb-b",
+      "rpc_url": "10.0.0.102:6667"
+    }
+  ],
+  "monitor": {
+    "node_check_interval": "5s",
+    "pipe_check_interval": "10s",
+    "consistency_check_interval": "10m"
+  },
+  "alert": {
+    "lag_warning_seconds": 5,
+    "lag_critical_seconds": 30,
+    "cooldown_seconds": 60,
+    "webhook_url": ""
+  },
+  "api": {
+    "port": 8080
+  },
+  "metrics": {
+    "enabled": true,
+    "port": 9090
+  },
+  "recovery": {
+    "enabled": true,
+    "auto_restart_wait": "30s",
+    "node_startup_wait": "30s",
+    "check_interval": "15s",
+    "long_offline_threshold_hours": 2,
+    "ha_status_file_path": "data/ha-cluster-status.json"
+  }
+}

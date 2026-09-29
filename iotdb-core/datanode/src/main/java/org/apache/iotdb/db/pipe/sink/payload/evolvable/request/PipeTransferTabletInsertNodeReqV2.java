@@ -70,7 +70,8 @@ public class PipeTransferTabletInsertNodeReqV2 extends PipeTransferTabletInsertN
         (InsertBaseStatement)
             IoTDBDataNodeReceiver.PLAN_TO_STATEMENT_VISITOR.process(insertNode, null);
 
-    // Tree model
+    // Tree model — databaseName is still needed because InsertRowsNode may carry a null
+    // targetPath, which prevents the receiver from deriving the database from the device path.
     if (Objects.isNull(dataBaseName)) {
       return statement;
     }
