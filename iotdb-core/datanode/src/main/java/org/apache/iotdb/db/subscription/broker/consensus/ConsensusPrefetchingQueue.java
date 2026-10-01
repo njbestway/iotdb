@@ -579,7 +579,7 @@ public class ConsensusPrefetchingQueue {
             this::requestPrefetchForRealtimeEntry,
             this::canAcceptRealtimeEntry);
     serverImpl.registerSubscriptionQueue(
-        pendingEntries, retentionPolicy, this::getCommittedRetainedMinVersionId);
+        pendingEntries, retentionPolicy, this::getRequiredRetainedMinVersionId);
 
     LOGGER.info(
         DataNodePipeMessages
@@ -1481,7 +1481,12 @@ public class ConsensusPrefetchingQueue {
         try {
           batchResult =
               accumulateFromPending(
-                  batch, lingerBatch, observedSeekGeneration, maxTablets, maxBatchBytes);
+                  batch,
+                  lingerBatch,
+                  observedSeekGeneration,
+                  maxWalEntries,
+                  maxTablets,
+                  maxBatchBytes);
         } finally {
           pendingEntries.release(batch);
         }
@@ -1758,6 +1763,7 @@ public class ConsensusPrefetchingQueue {
       final List<IndexedConsensusRequest> batch,
       final DeliveryBatchState lingerBatch,
       final long expectedSeekGeneration,
+      final int maxWalEntries,
       final int maxTablets,
       final long maxBatchBytes) {
 
@@ -1784,6 +1790,7 @@ public class ConsensusPrefetchingQueue {
                 searchIndex,
                 lingerBatch,
                 expectedSeekGeneration,
+                maxWalEntries,
                 maxTablets,
                 maxBatchBytes);
         if (gapFillResult != MaterializationResult.SUCCESS) {
@@ -1850,6 +1857,7 @@ public class ConsensusPrefetchingQueue {
       final long toIndex,
       final DeliveryBatchState batchState,
       final long expectedSeekGeneration,
+      final int maxWalEntries,
       final int maxTablets,
       final long maxBatchBytes) {
     pendingWalGapRetryRequested = false;
@@ -1857,9 +1865,13 @@ public class ConsensusPrefetchingQueue {
     if (seekGeneration.get() != expectedSeekGeneration || isClosed) {
       return MaterializationResult.STALE;
     }
+    // A pending-queue jump can span millions of WAL entries when real-time delivery has overflowed.
+    // Keep gap recovery within the normal per-round budget so sparse topic filtering cannot hold
+    // the
+    // queue read lock indefinitely and block unsubscribe from acquiring the close write lock.
     final MaterializationResult pumpResult =
         pumpFromSubscriptionWAL(
-            batchState, expectedSeekGeneration, Integer.MAX_VALUE, maxTablets, maxBatchBytes);
+            batchState, expectedSeekGeneration, maxWalEntries, maxTablets, maxBatchBytes);
     if (pumpResult != MaterializationResult.SUCCESS) {
       return pumpResult;
     }
@@ -2717,6 +2729,16 @@ public class ConsensusPrefetchingQueue {
     }
   }
 
+  public int requeueInFlightEvents(final String consumerId) {
+    int requeuedCount = 0;
+    for (final InFlightEventKey key : new ArrayList<>(inFlightEvents.keySet())) {
+      if (Objects.equals(consumerId, key.consumerId) && requeue(consumerId, key.commitContext)) {
+        requeuedCount++;
+      }
+    }
+    return requeuedCount;
+  }
+
   private boolean canAcceptCommitContext(
       final SubscriptionCommitContext commitContext, final String action, final boolean silent) {
     if (isClosed || closeRequested || pendingSeekRequest != null) {
@@ -3369,9 +3391,66 @@ public class ConsensusPrefetchingQueue {
     return committed;
   }
 
+  private long getRequiredRetainedMinVersionId() {
+    // Committed progress can advance on another consumer or replica while this queue is still
+    // replaying an older local search index. Keep both boundaries so WAL deletion can never pass
+    // the earliest entry this queue has not inspected yet.
+    return Math.min(getCommittedRetainedMinVersionId(), getReplayRetainedMinVersionId());
+  }
+
+  private static boolean isProgressAtLeast(
+      final RegionProgress progress, final RegionProgress previousProgress) {
+    if (Objects.isNull(progress) || Objects.isNull(previousProgress)) {
+      return false;
+    }
+    for (final Map.Entry<WriterId, WriterProgress> entry :
+        previousProgress.getWriterPositions().entrySet()) {
+      final WriterProgress writerProgress = progress.getWriterPositions().get(entry.getKey());
+      if (Objects.isNull(writerProgress)
+          || compareWriterProgress(writerProgress, entry.getValue()) < 0) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private boolean canReuseCommittedWalRetentionBound(final RegionProgress committedRegionProgress) {
+    if (!isProgressAtLeast(committedRegionProgress, lastCommittedProgressForRetention)
+        || Objects.isNull(lastRetainedWalFileForRetention)
+        || !lastRetainedWalFileForRetention.exists()
+        || WALFileUtils.parseVersionId(lastRetainedWalFileForRetention.getName())
+            != committedRetainedMinVersionId) {
+      return false;
+    }
+
+    final WalFileCommitRequirement requirement =
+        walFileCommitRequirements.get(committedRetainedMinVersionId);
+    return Objects.nonNull(requirement) && !requirement.isCoveredBy(committedRegionProgress);
+  }
+
   private long getCommittedRetainedMinVersionId() {
     refreshCommittedWalRetentionBound();
     return committedRetainedMinVersionId;
+  }
+
+  private long getReplayRetainedMinVersionId() {
+    if (!(consensusReqReader instanceof WALNode)) {
+      return 0L;
+    }
+    final WALNode walNode = (WALNode) consensusReqReader;
+    return findReplayRetainedMinVersionId(
+        walNode.getSortedWalFilesSnapshot(), nextExpectedSearchIndex.get());
+  }
+
+  static long findReplayRetainedMinVersionId(
+      final File[] walFiles, final long nextExpectedSearchIndex) {
+    if (Objects.isNull(walFiles) || walFiles.length == 0) {
+      return 0L;
+    }
+
+    final int replayFileIndex =
+        Math.max(0, WALFileUtils.binarySearchFileBySearchIndex(walFiles, nextExpectedSearchIndex));
+    return WALFileUtils.parseVersionId(walFiles[replayFileIndex].getName());
   }
 
   private void refreshCommittedWalRetentionBoundAndNotify() {
@@ -3388,6 +3467,13 @@ public class ConsensusPrefetchingQueue {
       if (Objects.equals(lastCommittedProgressForRetention, committedRegionProgress)
           && Objects.nonNull(lastRetainedWalFileForRetention)
           && lastRetainedWalFileForRetention.exists()) {
+        return false;
+      }
+
+      // The previous boundary file remains the first uncommitted file while its cached
+      // requirement is still uncovered by monotonically advancing committed progress.
+      if (canReuseCommittedWalRetentionBound(committedRegionProgress)) {
+        lastCommittedProgressForRetention = committedRegionProgress;
         return false;
       }
 
