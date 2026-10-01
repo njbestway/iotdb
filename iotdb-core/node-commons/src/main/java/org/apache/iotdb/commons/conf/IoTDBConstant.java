@@ -61,6 +61,14 @@ public class IoTDBConstant {
   public static final String CN_ROLE = "confignode";
   public static final String DN_ROLE = "datanode";
 
+  /**
+   * System property set by {@code org.apache.iotdb.edge.EdgeNode} to mark that the ConfigNode and
+   * the DataNode run inside ONE merged JVM. Co-located components use it to skip cross-node calls
+   * that are meaningless (and can only fail) when the peer node shares the same process lifecycle,
+   * e.g. the DataNode shutdown hook reporting its shutdown to a ConfigNode that is also terminating.
+   */
+  public static final String MERGED_EDGE_NODE_MODE = "iotdb.edge.merged.mode";
+
   public static final String DATA_NODE_CONF_FILE_NAME = "iotdb-datanode.properties";
 
   public static final String DN_RPC_ADDRESS = "dn_rpc_address";

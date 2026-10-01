@@ -28,6 +28,7 @@ import org.apache.iotdb.commons.client.exception.ClientManagerException;
 import org.apache.iotdb.commons.cluster.NodeStatus;
 import org.apache.iotdb.commons.concurrent.ThreadName;
 import org.apache.iotdb.commons.conf.CommonDescriptor;
+import org.apache.iotdb.commons.conf.IoTDBConstant;
 import org.apache.iotdb.commons.disk.utils.DirectoryChecker;
 import org.apache.iotdb.commons.pipe.config.PipeConfig;
 import org.apache.iotdb.consensus.ConsensusFactory;
@@ -194,8 +195,16 @@ public class DataNodeShutdownHook extends Thread {
     // it.
     DataNode.getInstance().stop();
 
-    // Set and report shutdown to cluster ConfigNode-leader
-    if (!reportShutdownToConfigNodeLeader()) {
+    // Set and report shutdown to cluster ConfigNode-leader.
+    // In merged EdgeNode mode the ConfigNode shares this JVM and is shutting down concurrently
+    // (its own hook has already closed the internal RPC port), so this best-effort report can only
+    // fail with "Connection refused" and would emit a spurious ERROR/WARN. Skip it: the whole node
+    // is going down and there is no surviving leader to notify.
+    if (Boolean.getBoolean(IoTDBConstant.MERGED_EDGE_NODE_MODE)) {
+      logger.debug(
+          DataNodeMiscMessages
+              .MISC_LOG_SKIPPING_DATANODE_SHUTDOWN_REPORT_IN_MERGED_EDGE_NODE_9C1F2A7B);
+    } else if (!reportShutdownToConfigNodeLeader()) {
       logger.warn(
           DataNodeMiscMessages
               .MISC_LOG_FAILED_TO_REPORT_DATANODE_S_SHUTDOWN_TO_CONFIGNODE_THE_CLUSTER_E6727497);

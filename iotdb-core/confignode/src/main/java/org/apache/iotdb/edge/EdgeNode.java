@@ -19,6 +19,7 @@
 
 package org.apache.iotdb.edge;
 
+import org.apache.iotdb.commons.conf.IoTDBConstant;
 import org.apache.iotdb.confignode.conf.ConfigNodeDescriptor;
 import org.apache.iotdb.confignode.i18n.ConfigNodeMessages;
 import org.apache.iotdb.confignode.service.ConfigNode;
@@ -61,6 +62,11 @@ public final class EdgeNode {
   private EdgeNode() {}
 
   public static void main(String[] args) throws Exception {
+    // Flag merged mode BEFORE any node service starts, so co-located components can skip
+    // cross-node calls that are meaningless when ConfigNode and DataNode share one JVM lifecycle
+    // (e.g. the DataNode shutdown hook reporting to a ConfigNode that is also terminating).
+    System.setProperty(IoTDBConstant.MERGED_EDGE_NODE_MODE, "true");
+
     LOGGER.info(ConfigNodeMessages.LOG_STARTING_IOTDB_EDGE_CONFIGNODE_AND_DATANODE_IN_ONE_77F32605);
 
     final AtomicReference<Throwable> configNodeError = new AtomicReference<>();

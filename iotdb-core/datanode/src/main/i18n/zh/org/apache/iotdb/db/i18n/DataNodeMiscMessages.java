@@ -1081,6 +1081,8 @@ public final class DataNodeMiscMessages {
       "DataNode 退出。JVM 内存使用情况：{}";
   public static final String MISC_LOG_FAILED_TO_REPORT_DATANODE_S_SHUTDOWN_TO_CONFIGNODE_THE_CLUSTER_E6727497 =
       "无法向 ConfigNode 上报 DataNode 关闭状态。集群在接下来的几秒内仍会将当前 DataNode 视为 Running。";
+  public static final String MISC_LOG_SKIPPING_DATANODE_SHUTDOWN_REPORT_IN_MERGED_EDGE_NODE_9C1F2A7B =
+      "跳过向 ConfigNode 上报 DataNode 关闭：当前为 EdgeNode 合并模式，ConfigNode 与本进程同 JVM 且正在并发关闭。";
   public static final String MISC_LOG_SOMETHING_WRONG_HAPPENED_WHILE_CALLING_CONSENSUS_LAYER_S_8B8FBB16 =
       "调用共识层的 triggerSnapshot API 时发生错误。";
   public static final String MISC_LOG_THE_ADDREGIONPEERTASK_HAS_ALREADY_BEEN_SUBMITTED_AND_WILL_4D398F73 =
