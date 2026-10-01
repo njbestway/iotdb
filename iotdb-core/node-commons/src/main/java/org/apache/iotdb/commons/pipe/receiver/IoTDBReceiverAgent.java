@@ -40,7 +40,14 @@ public abstract class IoTDBReceiverAgent {
 
   private static final Logger LOGGER = LoggerFactory.getLogger(IoTDBReceiverAgent.class);
 
-  protected static final Map<Byte, Supplier<IoTDBReceiver>> RECEIVER_CONSTRUCTORS = new HashMap<>();
+  // NOTE: this map MUST be an instance field, not static. The ConfigNode receiver agent
+  // (IoTDBConfigNodeReceiverAgent) and the DataNode receiver agent (IoTDBDataNodeReceiverAgent)
+  // both register the same request version (VERSION_1) but map it to different receivers. When both
+  // run in ONE JVM (e.g. the merged EdgeNode), a shared static map lets the later-initialized agent
+  // overwrite the earlier one, so the ConfigNode would dispatch config-plan/handshake requests to
+  // IoTDBDataNodeReceiver, which forwards them back to the ConfigNode -> an infinite re-entrant loop
+  // that exhausts the DataNode->ConfigNode client pool. Keeping it per-instance isolates the two.
+  protected final Map<Byte, Supplier<IoTDBReceiver>> RECEIVER_CONSTRUCTORS = new HashMap<>();
 
   protected abstract void initConstructors();
 

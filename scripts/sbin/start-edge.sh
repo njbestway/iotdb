@@ -88,6 +88,14 @@ iotdb_parms="$iotdb_parms -DIOTDB_LOG_DIR=${IOTDB_LOG_DIR}"
 iotdb_parms="$iotdb_parms -DCONFIGNODE_LOG_DIR=${IOTDB_LOG_DIR}"
 iotdb_parms="$iotdb_parms -DOFF_HEAP_MEMORY=${OFF_HEAP_MEMORY}"
 
+# Optional: embed the HA Monitor into this JVM (see org.apache.iotdb.edge.HaMonitorBootstrap).
+# Enable by exporting IOTDB_HA_ENABLED=true before running this script, and optionally point
+# IOTDB_HA_CONFIG at an absolute config.json path. The iotdb-ha jar must be present in lib/.
+if [ -n "${IOTDB_HA_ENABLED}" ]; then
+    iotdb_parms="$iotdb_parms -Diotdb.ha.enabled=${IOTDB_HA_ENABLED}"
+    iotdb_parms="$iotdb_parms -Diotdb.ha.config=${IOTDB_HA_CONFIG:-${IOTDB_CONF}/ha-config.json}"
+fi
+
 classname=org.apache.iotdb.edge.EdgeNode
 
 echo "Starting IoTDB Edge (ConfigNode + DataNode in one process)"

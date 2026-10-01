@@ -31,10 +31,10 @@
         <prometheus.version>0.16.0</prometheus.version>
     </properties>
     <dependencies>
-        <!-- IoTDB JDBC client — provided by ConfigNode/DataNode runtime (tsfile, session, thrift, etc.) -->
+        <!-- IoTDB Session client — provided by ConfigNode/DataNode runtime -->
         <dependency>
             <groupId>org.apache.iotdb</groupId>
-            <artifactId>iotdb-jdbc</artifactId>
+            <artifactId>iotdb-session</artifactId>
             <version>${project.version}</version>
             <scope>provided</scope>
         </dependency>

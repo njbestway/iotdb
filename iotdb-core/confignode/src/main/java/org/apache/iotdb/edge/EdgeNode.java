@@ -87,6 +87,10 @@ public final class EdgeNode {
     // DataNode.main returns after a successful start; the services of both nodes keep the JVM
     // alive with non-daemon threads afterwards.
     DataNode.main(new String[] {"-s"});
+
+    // Both nodes are up now, so the HA Monitor's Session API can reach the local RPC port.
+    // No-op unless -Diotdb.ha.enabled=true is set (see HaMonitorBootstrap).
+    HaMonitorBootstrap.maybeStart();
   }
 
   private static void throwIfConfigNodeBootstrapFailed(AtomicReference<Throwable> configNodeError) {

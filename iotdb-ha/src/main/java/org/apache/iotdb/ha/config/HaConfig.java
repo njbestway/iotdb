@@ -57,8 +57,8 @@ public class HaConfig {
   @SerializedName("recovery")
   private RecoveryConfig recovery = new RecoveryConfig();
 
-  @SerializedName("jdbc")
-  private JdbcConfig jdbc = new JdbcConfig();
+  @SerializedName("session")
+  private SessionConfig session = new SessionConfig();
 
   public static HaConfig load(String configPath) throws IOException {
     Path path = Paths.get(configPath);
@@ -109,8 +109,29 @@ public class HaConfig {
     return parseDuration(monitor.pipeCheckInterval);
   }
 
+  /**
+   * TTL of the per-node pipe-status cache in {@code PipeInspector}. A single recovery cycle calls
+   * {@code getPipes} 3x per node and a single REST {@code /cluster} call 4x; the cache collapses
+   * those redundant calls into one real fetch per node per TTL window, drastically cutting the
+   * number of {@code SHOW PIPES} statements (each of which borrows a DataNode→ConfigNode client).
+   * Keep it well below {@code recovery.auto_restart_wait} so recovery stays responsive.
+   */
+  public long getPipeCacheTtlMs() {
+    return parseDuration(monitor.pipeCacheTtl != null ? monitor.pipeCacheTtl : "2s");
+  }
+
   public long getConsistencyCheckIntervalMs() {
     return parseDuration(monitor.consistencyCheckInterval);
+  }
+
+  /** Connect/read timeout (ms) for the HA↔HA pipe-status HTTP exchange. */
+  public long getRemoteHttpTimeoutMs() {
+    return parseDuration(monitor.remoteHttpTimeout != null ? monitor.remoteHttpTimeout : "3s");
+  }
+
+  /** Whether the legacy remote {@code SHOW PIPES} Session fallback is allowed for the peer node. */
+  public boolean isRemotePipeStatusViaSessionEnabled() {
+    return monitor.remotePipeStatusViaSession;
   }
 
   public int getLagWarningSeconds() {
@@ -174,12 +195,12 @@ public class HaConfig {
     recovery.haStatusFilePath = absolutePath;
   }
 
-  public String getJdbcUsername() {
-    return jdbc.username;
+  public String getSessionUsername() {
+    return session.username;
   }
 
-  public String getJdbcPassword() {
-    return jdbc.password;
+  public String getSessionPassword() {
+    return session.password;
   }
 
   private static long parseDuration(String duration) {
@@ -210,6 +231,15 @@ public class HaConfig {
 
     @SerializedName("rpc_url")
     public String rpcUrl;
+
+    /**
+     * Base URL of this node's HA Monitor REST API (e.g. {@code http://127.0.0.1:8081}). When set,
+     * the peer monitor fetches this node's pipe status over HA↔HA HTTP ({@code /api/v1/pipes})
+     * instead of opening a remote {@code SHOW PIPES} Session against this node's DataNode. Leaving
+     * it empty disables the HTTP exchange for this node.
+     */
+    @SerializedName("api_url")
+    public String apiUrl;
   }
 
   public static class MonitorConfig {
@@ -219,8 +249,25 @@ public class HaConfig {
     @SerializedName("pipe_check_interval")
     public String pipeCheckInterval = "10s";
 
+    @SerializedName("pipe_cache_ttl")
+    public String pipeCacheTtl = "2s";
+
     @SerializedName("consistency_check_interval")
     public String consistencyCheckInterval = "10m";
+
+    /** Connect/read timeout for the HA↔HA pipe-status HTTP exchange. */
+    @SerializedName("remote_http_timeout")
+    public String remoteHttpTimeout = "3s";
+
+    /**
+     * When {@code false} (default) the monitor NEVER opens a remote {@code SHOW PIPES} Session for
+     * the peer node — it relies solely on the HA↔HA HTTP exchange and serves the last known-good
+     * snapshot when the peer is unreachable. This keeps the peer's DataNode RPC threads and
+     * ConfigNode client pool free of monitoring traffic (which otherwise competes with schema
+     * transfers). Set {@code true} only to restore the legacy remote-Session fallback.
+     */
+    @SerializedName("remote_pipe_status_via_session")
+    public boolean remotePipeStatusViaSession = false;
   }
 
   public static class AlertConfig {
@@ -270,7 +317,7 @@ public class HaConfig {
     public String haStatusFilePath = "data/ha-cluster-status.json";
   }
 
-  public static class JdbcConfig {
+  public static class SessionConfig {
     @SerializedName("username")
     public String username = "root";
 

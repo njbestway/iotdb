@@ -21,15 +21,13 @@ package org.apache.iotdb.ha.recovery;
 
 import org.apache.iotdb.ha.alert.Alerter;
 import org.apache.iotdb.ha.checker.NodeHealthChecker;
-import org.apache.iotdb.ha.checker.NodeJdbcConnectionManager;
+import org.apache.iotdb.ha.checker.NodeSessionManager;
 import org.apache.iotdb.ha.checker.PipeInspector;
 import org.apache.iotdb.ha.config.HaConfig;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.sql.Connection;
-import java.sql.Statement;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -48,7 +46,7 @@ public class RecoveryManager {
   private final PipeInspector pipeInspector;
   private final NodeHealthChecker healthChecker;
   private final Alerter alerter;
-  private final NodeJdbcConnectionManager connManager;
+  private final NodeSessionManager sessionManager;
 
   /** Tracks when a pipe was first seen in STOPPED/FAILED state. */
   private final Map<String, Long> pipeFailureDetectedAt = new ConcurrentHashMap<>();
@@ -67,12 +65,12 @@ public class RecoveryManager {
       PipeInspector pipeInspector,
       NodeHealthChecker healthChecker,
       Alerter alerter,
-      NodeJdbcConnectionManager connManager) {
+      NodeSessionManager sessionManager) {
     this.config = config;
     this.pipeInspector = pipeInspector;
     this.healthChecker = healthChecker;
     this.alerter = alerter;
-    this.connManager = connManager;
+    this.sessionManager = sessionManager;
 
     // Initialize previous node state
     for (HaConfig.NodeConfig node : config.getNodes()) {
@@ -408,15 +406,15 @@ public class RecoveryManager {
     }
   }
 
-  // ── JDBC Execution ────────────────────────────────────────────────────
+  // ── SQL Execution ────────────────────────────────────────────────────
 
-  /** Execute START PIPE via JDBC. Returns true if successful. */
+  /** Execute START PIPE via Session. Returns true if successful. */
   private boolean executeStartPipe(String rpcUrl, String pipeName) {
     String sql = "START PIPE " + pipeName;
-    return executeJdbc(rpcUrl, sql);
+    return executeSql(rpcUrl, sql);
   }
 
-  /** Execute LOAD TsFile via JDBC. Returns true if successful. */
+  /** Execute LOAD TsFile via Session. Returns true if successful. */
   public boolean executeLoadTsFile(String rpcUrl, String tsFilePath) {
     // Validate path to prevent SQL injection
     if (tsFilePath == null || tsFilePath.isEmpty()) {
@@ -431,23 +429,11 @@ public class RecoveryManager {
       return false;
     }
     String sql = "LOAD '" + tsFilePath + "'";
-    return executeJdbc(rpcUrl, sql);
+    return executeSql(rpcUrl, sql);
   }
 
-  private boolean executeJdbc(String rpcUrl, String sql) {
-    try {
-      // Reuse the shared persistent connection — do NOT close it
-      Connection conn = connManager.getConnection(rpcUrl);
-      try (Statement stmt = conn.createStatement()) {
-        stmt.execute(sql);
-        logger.info("Executed SQL on {}: {}", rpcUrl, sql);
-        return true;
-      }
-    } catch (Exception e) {
-      logger.error("SQL execution failed on {} [{}]: {}", rpcUrl, sql, e.getMessage());
-      connManager.invalidate(rpcUrl);
-      return false;
-    }
+  private boolean executeSql(String rpcUrl, String sql) {
+    return sessionManager.executeNonQuery(rpcUrl, sql);
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────

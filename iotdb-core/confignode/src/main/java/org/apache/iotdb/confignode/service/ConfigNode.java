@@ -58,7 +58,6 @@ import org.apache.iotdb.confignode.manager.pipe.metric.PipeConfigNodeMetrics;
 import org.apache.iotdb.confignode.rpc.thrift.TConfigNodeRegisterReq;
 import org.apache.iotdb.confignode.rpc.thrift.TConfigNodeRegisterResp;
 import org.apache.iotdb.confignode.rpc.thrift.TNodeVersionInfo;
-import org.apache.iotdb.confignode.service.ha.HaMonitorBootstrap;
 import org.apache.iotdb.confignode.service.thrift.ConfigNodeRPCService;
 import org.apache.iotdb.confignode.service.thrift.ConfigNodeRPCServiceProcessor;
 import org.apache.iotdb.metrics.config.MetricConfigDescriptor;
@@ -204,7 +203,6 @@ public class ConfigNode extends ServerCommandLine implements ConfigNodeMBean {
         }
         loadSecretKey();
         loadHardwareCode();
-        HaMonitorBootstrap.maybeStart();
         return;
       } else {
         saveSecretKey();
@@ -246,7 +244,6 @@ public class ConfigNode extends ServerCommandLine implements ConfigNodeMBean {
             ConfigNodeMessages.HAS_SUCCESSFULLY_STARTED_AND_JOINED_THE_CLUSTER,
             ConfigNodeConstant.GLOBAL_NAME,
             CONF.getClusterName());
-        HaMonitorBootstrap.maybeStart();
         return;
       }
 

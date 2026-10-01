@@ -22,7 +22,7 @@ package org.apache.iotdb.ha;
 import org.apache.iotdb.ha.alert.Alerter;
 import org.apache.iotdb.ha.api.ApiServer;
 import org.apache.iotdb.ha.checker.NodeHealthChecker;
-import org.apache.iotdb.ha.checker.NodeJdbcConnectionManager;
+import org.apache.iotdb.ha.checker.NodeSessionManager;
 import org.apache.iotdb.ha.checker.PipeInspector;
 import org.apache.iotdb.ha.cluster.ClusterAggregator;
 import org.apache.iotdb.ha.cluster.ClusterSyncWriter;
@@ -38,10 +38,12 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 /** Main entry point for the IoTDB HA Monitor. */
 public class HaMonitorMain {
@@ -86,7 +88,7 @@ public class HaMonitorMain {
           .register();
 
   private final HaConfig config;
-  private final NodeJdbcConnectionManager connManager;
+  private final NodeSessionManager sessionManager;
   private final NodeHealthChecker healthChecker;
   private final PipeInspector pipeInspector;
   private final ClusterAggregator clusterAggregator;
@@ -100,19 +102,36 @@ public class HaMonitorMain {
 
   public HaMonitorMain(HaConfig config) throws IOException {
     this.config = config;
-    this.connManager =
-        new NodeJdbcConnectionManager(config.getJdbcUsername(), config.getJdbcPassword());
+    this.sessionManager =
+        new NodeSessionManager(config.getSessionUsername(), config.getSessionPassword());
     this.healthChecker = new NodeHealthChecker(config);
-    this.pipeInspector = new PipeInspector(config, connManager);
+    this.pipeInspector = new PipeInspector(config, sessionManager, healthChecker);
     this.clusterAggregator = new ClusterAggregator(config, healthChecker, pipeInspector);
     this.alerter = new Alerter(config);
     this.recoveryManager =
         config.isRecoveryEnabled()
-            ? new RecoveryManager(config, pipeInspector, healthChecker, alerter, connManager)
+            ? new RecoveryManager(config, pipeInspector, healthChecker, alerter, sessionManager)
             : null;
     this.clusterSyncWriter = new ClusterSyncWriter(config, healthChecker, pipeInspector);
-    this.apiServer = new ApiServer(config, clusterAggregator, alerter, recoveryManager);
+    this.apiServer =
+        new ApiServer(
+            config, clusterAggregator, alerter, recoveryManager, pipeInspector, healthChecker);
     this.scheduler = Executors.newScheduledThreadPool(4);
+  }
+
+  /**
+   * Register an in-process supplier returning the LOCAL node's pipe status read directly from
+   * ConfigNode memory. Injected by {@code HaMonitorBootstrap} (confignode module) via reflection so
+   * that module keeps no compile-time dependency on iotdb-ha — only JDK types cross the boundary.
+   * When set, {@link PipeInspector} bypasses {@code SHOW PIPES} for the local node entirely, which
+   * removes the per-poll DataNode→ConfigNode client borrow that competes with schema transfers.
+   *
+   * <p>Each map carries keys {@code id}, {@code state}, {@code remainingEventCount}, {@code
+   * estimatedRemainingSeconds}; returning {@code null} signals "unavailable, fall back to SHOW
+   * PIPES".
+   */
+  public void setLocalPipeStatusProvider(Supplier<List<Map<String, Object>>> provider) {
+    this.pipeInspector.setLocalPipeStatusProvider(provider);
   }
 
   public void start() throws IOException {
@@ -138,12 +157,14 @@ public class HaMonitorMain {
         config.getNodeCheckIntervalMs(),
         TimeUnit.MILLISECONDS);
 
-    // Schedule pipe inspections
+    // Schedule pipe inspections. This loop now ALSO drives remote liveness: each remote poll is a
+    // single HTTP call that fetches pipes AND reports UP/DOWN back into the health checker, so it
+    // runs at the (faster) node-check interval rather than the pipe-check interval.
     HaScheduledExecutorUtil.safelyScheduleAtFixedRate(
         scheduler,
         this::runPipeInspection,
         5000,
-        config.getPipeCheckIntervalMs(),
+        config.getNodeCheckIntervalMs(),
         TimeUnit.MILLISECONDS);
 
     // Schedule recovery checks (if enabled)
@@ -196,7 +217,7 @@ public class HaMonitorMain {
     if (prometheusServer != null) {
       prometheusServer.close();
     }
-    connManager.close();
+    sessionManager.close();
     shutdownLatch.countDown();
     logger.info("IoTDB HA Monitor stopped");
   }
@@ -243,9 +264,21 @@ public class HaMonitorMain {
 
   private void runPipeInspection() {
     try {
+      String localId = config.getLocalNode().id;
       for (HaConfig.NodeConfig node : config.getNodes()) {
-        if (!healthChecker.isUp(node.id)) {
-          continue;
+        if (node.id.equals(localId)) {
+          // Local node: liveness comes from the loopback TCP probe in runNodeHealthCheck; pipes come
+          // from the in-memory provider (zero RPC). Skip only if this node's own RPC is not up yet.
+          if (!healthChecker.isUp(node.id)) {
+            continue;
+          }
+        } else {
+          // Remote node: ONE HTTP call fetches pipes AND reports liveness back into healthChecker
+          // (see PipeInspector.fetchPipes). Skip while in exponential backoff so a DOWN peer is not
+          // hammered; when due, getPipes() triggers the real fetch (cache TTL < check interval).
+          if (!healthChecker.dueForCheck(node.id)) {
+            continue;
+          }
         }
         List<PipeInspector.PipeInfo> pipes = pipeInspector.getPipes(node.id);
         for (PipeInspector.PipeInfo pipe : pipes) {

@@ -20,6 +20,8 @@
 package org.apache.iotdb.ha.api;
 
 import org.apache.iotdb.ha.alert.Alerter;
+import org.apache.iotdb.ha.checker.NodeHealthChecker;
+import org.apache.iotdb.ha.checker.PipeInspector;
 import org.apache.iotdb.ha.cluster.ClusterAggregator;
 import org.apache.iotdb.ha.config.HaConfig;
 import org.apache.iotdb.ha.recovery.RecoveryManager;
@@ -35,6 +37,11 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 /** Lightweight HTTP API server using JDK built-in HttpServer. */
 public class ApiServer {
@@ -45,22 +52,29 @@ public class ApiServer {
   private final ClusterAggregator clusterAggregator;
   private final Alerter alerter;
   private final RecoveryManager recoveryManager;
+  private final PipeInspector pipeInspector;
+  private final NodeHealthChecker healthChecker;
   private HttpServer server;
 
   public ApiServer(
       HaConfig config,
       ClusterAggregator clusterAggregator,
       Alerter alerter,
-      RecoveryManager recoveryManager) {
+      RecoveryManager recoveryManager,
+      PipeInspector pipeInspector,
+      NodeHealthChecker healthChecker) {
     this.config = config;
     this.clusterAggregator = clusterAggregator;
     this.alerter = alerter;
     this.recoveryManager = recoveryManager;
+    this.pipeInspector = pipeInspector;
+    this.healthChecker = healthChecker;
   }
 
   public void start() throws IOException {
     server = HttpServer.create(new InetSocketAddress(config.getApiPort()), 0);
     server.createContext("/api/v1/cluster", this::handleCluster);
+    server.createContext("/api/v1/pipes", this::handlePipes);
     server.createContext("/api/v1/status", this::handleStatus);
     server.createContext("/api/v1/alerts", this::handleAlerts);
     server.createContext("/api/v1/health", this::handleHealth);
@@ -84,6 +98,49 @@ public class ApiServer {
     }
     String json = clusterAggregator.buildClusterViewJson();
     sendResponse(exchange, 200, json);
+  }
+
+  /**
+   * HA↔HA pipe-status exchange endpoint. Returns THIS node's own pipe status, read from the local
+   * monitor's in-memory ConfigNode provider (zero RPC), PLUS a {@code data_node_up} self-check flag.
+   * The peer monitor calls this instead of opening a remote {@code SHOW PIPES} Session against this
+   * node's DataNode, which keeps this node's DataNode RPC threads and ConfigNode client pool free
+   * for schema transfers. Because the response also conveys liveness, the peer no longer needs a
+   * separate TCP probe of this node — one request answers both "is it up" and "what are its pipes".
+   */
+  private void handlePipes(HttpExchange exchange) throws IOException {
+    if (!"GET".equals(exchange.getRequestMethod())) {
+      sendResponse(exchange, 405, "{\"error\":\"Method not allowed\"}");
+      return;
+    }
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("node", config.getLocalNode().id);
+    body.put("timestamp", Instant.now().toString());
+    // Self-reported data-plane liveness: this node's own loopback TCP probe of its DataNode RPC
+    // port, maintained by NodeHealthChecker. The peer folds it into its UP/DOWN decision so one HTTP
+    // call replaces a separate cross-node TCP probe AND guarantees recovery only runs when the data
+    // plane is truly ready.
+    boolean localDataUp = healthChecker == null || healthChecker.isUp(config.getLocalNode().id);
+    body.put("data_node_up", localDataUp);
+    if (healthChecker != null) {
+      NodeHealthChecker.NodeStatus st = healthChecker.getStatusMap().get(config.getLocalNode().id);
+      if (st != null && st.isUp) {
+        body.put("uptime_ms", st.getUptimeMs());
+      }
+    }
+    List<Map<String, Object>> pipes = new ArrayList<>();
+    if (pipeInspector != null) {
+      for (PipeInspector.PipeInfo p : pipeInspector.getPipes(config.getLocalNode().id)) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", p.pipeName);
+        m.put("state", p.status);
+        m.put("remainingEventCount", p.remainingEventCount);
+        m.put("estimatedRemainingSeconds", p.estimatedRemainingSeconds);
+        pipes.add(m);
+      }
+    }
+    body.put("pipes", pipes);
+    sendResponse(exchange, 200, GSON.toJson(body));
   }
 
   private void handleStatus(HttpExchange exchange) throws IOException {

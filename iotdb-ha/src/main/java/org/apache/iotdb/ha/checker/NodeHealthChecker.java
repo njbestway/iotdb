@@ -30,29 +30,26 @@ import java.net.Socket;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-/** Checks IoTDB node health via JDBC. Uses exponential backoff when node is DOWN. */
+/** Checks IoTDB node health via TCP socket probe. Uses exponential backoff when node is DOWN. */
 public class NodeHealthChecker {
   private static final Logger logger = LoggerFactory.getLogger(NodeHealthChecker.class);
-
-  private static final String JDBC_DRIVER = "org.apache.iotdb.jdbc.IoTDBDriver";
-  private static final String JDBC_PREFIX = "jdbc:iotdb://";
 
   private final HaConfig config;
   private final Map<String, NodeStatus> statusMap = new ConcurrentHashMap<>();
 
   public NodeHealthChecker(HaConfig config) {
     this.config = config;
-    try {
-      Class.forName(JDBC_DRIVER);
-    } catch (ClassNotFoundException e) {
-      throw new RuntimeException("IoTDB JDBC driver not found", e);
-    }
     for (HaConfig.NodeConfig node : config.getNodes()) {
       statusMap.put(node.id, new NodeStatus());
     }
   }
 
-  /** Check a single node. Returns true if healthy. */
+  /**
+   * Probe a single node over TCP and update its status. After the HA↔HA HTTP merge this is used for
+   * the LOCAL node only; the remote node is no longer TCP-probed here — its liveness is reported
+   * back by {@code PipeInspector} from the pipe-status HTTP exchange (see {@link
+   * #recordProbeResult}). Returns true if healthy.
+   */
   public boolean check(String nodeId) {
     HaConfig.NodeConfig nodeConfig = findNode(nodeId);
     if (nodeConfig == null) {
@@ -69,6 +66,23 @@ public class NodeHealthChecker {
     }
 
     boolean healthy = doCheck(nodeConfig.rpcUrl);
+    recordProbeResult(nodeId, healthy);
+    return healthy;
+  }
+
+  /**
+   * Update a node's health state machine from an externally-obtained probe result, without
+   * performing the probe itself. The remote node's liveness is fed in here by {@code PipeInspector}:
+   * a single {@code GET /api/v1/pipes} HTTP call both fetches pipe status AND decides UP/DOWN (UP
+   * requires HTTP 200 plus the peer's own {@code data_node_up} self-check), so one request replaces
+   * the old separate cross-node TCP liveness probe.
+   */
+  public void recordProbeResult(String nodeId, boolean healthy) {
+    NodeStatus status = statusMap.get(nodeId);
+    if (status == null) {
+      return;
+    }
+    long now = System.currentTimeMillis();
     status.lastCheckTime = now;
 
     if (healthy) {
@@ -92,15 +106,33 @@ public class NodeHealthChecker {
               config.getNodeCheckIntervalMs() * (1L << Math.min(status.consecutiveFailures, 4)),
               60000);
     }
-
-    return healthy;
   }
 
-  /** Check all nodes. */
-  public void checkAll() {
-    for (HaConfig.NodeConfig node : config.getNodes()) {
-      check(node.id);
+  /**
+   * Whether {@code nodeId} is due for a probe, honoring exponential backoff. The remote poll loop
+   * uses this so a node known to be DOWN is not hammered every cycle.
+   */
+  public boolean dueForCheck(String nodeId) {
+    NodeStatus status = statusMap.get(nodeId);
+    if (status == null) {
+      return false;
     }
+    return System.currentTimeMillis() - status.lastCheckTime >= status.currentBackoffMs;
+  }
+
+  /** TCP-probe the LOCAL node only (loopback, zero cross-node traffic). */
+  public void checkLocal() {
+    check(config.getLocalNode().id);
+  }
+
+  /**
+   * Probe every node that still relies on a direct TCP check. After the HA↔HA HTTP merge this is
+   * only the LOCAL node: the remote node's liveness is reported back from the pipe-status HTTP
+   * exchange, so we no longer open a TCP connection to the peer's DataNode RPC port (which used to
+   * appear as harmless {@code Session-0-null ... is closing} noise in the peer's log).
+   */
+  public void checkAll() {
+    checkLocal();
   }
 
   public boolean isUp(String nodeId) {

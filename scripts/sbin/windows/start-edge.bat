@@ -101,6 +101,14 @@ set iotdb_parms=%iotdb_parms% -DIOTDB_LOG_DIR="%IOTDB_LOG_DIR%"
 set iotdb_parms=%iotdb_parms% -DCONFIGNODE_LOG_DIR="%IOTDB_LOG_DIR%"
 set iotdb_parms=%iotdb_parms% -DOFF_HEAP_MEMORY=%OFF_HEAP_MEMORY%
 
+@REM Optional: embed the HA Monitor into this JVM (see org.apache.iotdb.edge.HaMonitorBootstrap).
+@REM Enable by setting IOTDB_HA_ENABLED=true before running this script, and optionally point
+@REM IOTDB_HA_CONFIG at an absolute config.json path. The iotdb-ha jar must be present in lib\.
+@REM NOTE: use single-line if/set (NOT a parenthesised block). Inside a ( ... ) block cmd expands
+@REM %iotdb_parms% once at parse time, so a second set would overwrite the first and drop arguments.
+if NOT DEFINED IOTDB_HA_CONFIG set IOTDB_HA_CONFIG=%IOTDB_CONF%\ha-config.json
+if DEFINED IOTDB_HA_ENABLED set iotdb_parms=%iotdb_parms% -Diotdb.ha.enabled=%IOTDB_HA_ENABLED% -Diotdb.ha.config="%IOTDB_HA_CONFIG%"
+
 @REM -----------------------------------------------------------------------------
 @REM START
 java %illegal_access_params% %iotdb_parms% %IOTDB_JMX_OPTS% -cp "%CLASSPATH%" %MAIN_CLASS% -s
