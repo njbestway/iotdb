@@ -21,12 +21,15 @@ package org.apache.iotdb.ha;
 
 import org.apache.iotdb.ha.alert.Alerter;
 import org.apache.iotdb.ha.api.ApiServer;
+import org.apache.iotdb.ha.audit.DataAuditor;
 import org.apache.iotdb.ha.checker.NodeHealthChecker;
 import org.apache.iotdb.ha.checker.NodeSessionManager;
 import org.apache.iotdb.ha.checker.PipeInspector;
 import org.apache.iotdb.ha.cluster.ClusterAggregator;
 import org.apache.iotdb.ha.cluster.ClusterSyncWriter;
+import org.apache.iotdb.ha.cluster.PeerNotifier;
 import org.apache.iotdb.ha.config.HaConfig;
+import org.apache.iotdb.ha.monitor.BacklogMonitor;
 import org.apache.iotdb.ha.recovery.RecoveryManager;
 import org.apache.iotdb.ha.util.HaScheduledExecutorUtil;
 
@@ -86,6 +89,41 @@ public class HaMonitorMain {
           .help("Total recovery actions executed")
           .labelNames("action", "result")
           .register();
+  private static final Gauge AUDIT_ROW_DIFF =
+      Gauge.build()
+          .name("iotdb_ha_audit_row_diff")
+          .help("Data audit row-count difference (source - target) per table")
+          .labelNames("database", "table")
+          .register();
+  private static final Gauge AUDIT_CONSISTENT =
+      Gauge.build()
+          .name("iotdb_ha_audit_consistent")
+          .help("Data audit last pass consistency (1=consistent, 0=divergent)")
+          .register();
+  private static final Gauge BACKLOG_REMAINING =
+      Gauge.build()
+          .name("iotdb_ha_backlog_remaining_events")
+          .help("Pipe backlog remaining events per pipe")
+          .labelNames("node", "pipe")
+          .register();
+  private static final Gauge BACKLOG_ETA =
+      Gauge.build()
+          .name("iotdb_ha_backlog_eta_seconds")
+          .help("Pipe backlog estimated catch-up seconds per pipe")
+          .labelNames("node", "pipe")
+          .register();
+  private static final Gauge BACKLOG_DRAIN_RATE =
+      Gauge.build()
+          .name("iotdb_ha_backlog_drain_rate_eps")
+          .help("Pipe backlog drain rate (events/sec, positive=draining) per pipe")
+          .labelNames("node", "pipe")
+          .register();
+  private static final Gauge BACKLOG_SEVERITY =
+      Gauge.build()
+          .name("iotdb_ha_backlog_severity")
+          .help("Pipe backlog severity (0=OK, 1=WARNING, 2=CRITICAL) per pipe")
+          .labelNames("node", "pipe")
+          .register();
 
   private final HaConfig config;
   private final NodeSessionManager sessionManager;
@@ -94,7 +132,10 @@ public class HaMonitorMain {
   private final ClusterAggregator clusterAggregator;
   private final Alerter alerter;
   private final RecoveryManager recoveryManager;
+  private final DataAuditor dataAuditor;
+  private final BacklogMonitor backlogMonitor;
   private final ClusterSyncWriter clusterSyncWriter;
+  private final PeerNotifier peerNotifier;
   private final ApiServer apiServer;
   private final ScheduledExecutorService scheduler;
   private HTTPServer prometheusServer;
@@ -108,14 +149,35 @@ public class HaMonitorMain {
     this.pipeInspector = new PipeInspector(config, sessionManager, healthChecker);
     this.clusterAggregator = new ClusterAggregator(config, healthChecker, pipeInspector);
     this.alerter = new Alerter(config);
+    this.backlogMonitor =
+        config.isBacklogEnabled()
+            ? new BacklogMonitor(config, pipeInspector, healthChecker, alerter)
+            : null;
     this.recoveryManager =
         config.isRecoveryEnabled()
-            ? new RecoveryManager(config, pipeInspector, healthChecker, alerter, sessionManager)
+            ? new RecoveryManager(
+                config, pipeInspector, healthChecker, alerter, sessionManager, backlogMonitor)
+            : null;
+    this.dataAuditor =
+        config.isAuditEnabled()
+            ? new DataAuditor(config, sessionManager, healthChecker, alerter)
             : null;
     this.clusterSyncWriter = new ClusterSyncWriter(config, healthChecker, pipeInspector);
+    // Best-effort UP-push layer on top of polling: when THIS node's DataNode recovers we nudge the
+    // peer to re-probe immediately instead of waiting out its exponential backoff (≤60s → ~1 RTT).
+    this.peerNotifier = new PeerNotifier(config, healthChecker, pipeInspector);
+    this.healthChecker.setOnLocalNodeUp(this.peerNotifier::announceUp);
     this.apiServer =
         new ApiServer(
-            config, clusterAggregator, alerter, recoveryManager, pipeInspector, healthChecker);
+            config,
+            clusterAggregator,
+            alerter,
+            recoveryManager,
+            dataAuditor,
+            backlogMonitor,
+            pipeInspector,
+            healthChecker,
+            peerNotifier);
     this.scheduler = Executors.newScheduledThreadPool(4);
   }
 
@@ -183,6 +245,42 @@ public class HaMonitorMain {
       logger.info("Active recovery DISABLED (monitor-only mode)");
     }
 
+    // Schedule periodic data audit (if enabled). Runs on the replication source node only; compares
+    // row counts of every replicated table against the target and alerts on divergence.
+    if (dataAuditor != null) {
+      logger.info(
+          "Data audit ENABLED: interval={}s, row_count_tolerance={}, critical_threshold={}",
+          config.getAuditIntervalMs() / 1000,
+          config.getAuditRowCountTolerance(),
+          config.getAuditCriticalThreshold());
+      HaScheduledExecutorUtil.safelyScheduleAtFixedRate(
+          scheduler,
+          this::runDataAudit,
+          15000,
+          config.getAuditIntervalMs(),
+          TimeUnit.MILLISECONDS);
+    }
+
+    // Schedule intelligent pipe-backlog alerting (if enabled). Independent of recovery so backlog
+    // grading works even in monitor-only mode.
+    if (backlogMonitor != null) {
+      logger.info(
+          "Pipe backlog alerting ENABLED: interval={}s, warning>={} events / >={}s ETA, "
+              + "critical>={} events / >={}s ETA, stuck_window={}s",
+          config.getBacklogIntervalMs() / 1000,
+          config.getBacklogWarningEvents(),
+          config.getBacklogWarningEtaSeconds(),
+          config.getBacklogCriticalEvents(),
+          config.getBacklogCriticalEtaSeconds(),
+          config.getBacklogStuckWindowMs() / 1000);
+      HaScheduledExecutorUtil.safelyScheduleAtFixedRate(
+          scheduler,
+          this::runBacklogCheck,
+          8000,
+          config.getBacklogIntervalMs(),
+          TimeUnit.MILLISECONDS);
+    }
+
     // Resolve HA status file path to absolute (so DataNode can find it reliably)
     resolveStatusFileAbsolutePath();
 
@@ -214,6 +312,7 @@ public class HaMonitorMain {
       Thread.currentThread().interrupt();
     }
     apiServer.stop();
+    peerNotifier.close();
     if (prometheusServer != null) {
       prometheusServer.close();
     }
@@ -326,6 +425,42 @@ public class HaMonitorMain {
       recoveryManager.check();
     } catch (Exception e) {
       logger.error("Recovery check error", e);
+    }
+  }
+
+  private void runDataAudit() {
+    if (dataAuditor == null) {
+      return;
+    }
+    try {
+      dataAuditor.audit();
+      // Publish Prometheus metrics from the fresh report.
+      for (DataAuditor.AuditResult r : dataAuditor.getAuditResults()) {
+        AUDIT_ROW_DIFF.labels(r.database, r.table).set(r.diff);
+      }
+      AUDIT_CONSISTENT.set(dataAuditor.isLastRunConsistent() ? 1 : 0);
+    } catch (Exception e) {
+      logger.error("Data audit error", e);
+    }
+  }
+
+  private void runBacklogCheck() {
+    if (backlogMonitor == null) {
+      return;
+    }
+    try {
+      backlogMonitor.check();
+      // Publish Prometheus metrics from the fresh report.
+      for (BacklogMonitor.PipeBacklog b : backlogMonitor.getBacklogResults()) {
+        BACKLOG_REMAINING.labels(b.node, b.pipe).set(b.remaining);
+        BACKLOG_ETA.labels(b.node, b.pipe).set(b.etaSeconds);
+        BACKLOG_DRAIN_RATE.labels(b.node, b.pipe).set(b.drainRate);
+        int rank =
+            "CRITICAL".equals(b.severity) ? 2 : ("WARNING".equals(b.severity) ? 1 : 0);
+        BACKLOG_SEVERITY.labels(b.node, b.pipe).set(rank);
+      }
+    } catch (Exception e) {
+      logger.error("Backlog check error", e);
     }
   }
 

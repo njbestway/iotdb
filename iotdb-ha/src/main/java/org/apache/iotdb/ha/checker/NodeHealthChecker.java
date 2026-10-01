@@ -37,11 +37,23 @@ public class NodeHealthChecker {
   private final HaConfig config;
   private final Map<String, NodeStatus> statusMap = new ConcurrentHashMap<>();
 
+  /**
+   * Optional hook fired exactly once per DOWN→UP transition of the LOCAL node, so an observer (see
+   * {@code PeerNotifier}) can push a "I'm back" hint to the peer and collapse its backoff. Invoked
+   * on the health-check scheduler thread — implementations MUST NOT block (dispatch async).
+   */
+  private volatile Runnable onLocalNodeUp;
+
   public NodeHealthChecker(HaConfig config) {
     this.config = config;
     for (HaConfig.NodeConfig node : config.getNodes()) {
       statusMap.put(node.id, new NodeStatus());
     }
+  }
+
+  /** Register the LOCAL-node DOWN→UP transition hook (see {@link #onLocalNodeUp}). */
+  public void setOnLocalNodeUp(Runnable hook) {
+    this.onLocalNodeUp = hook;
   }
 
   /**
@@ -88,6 +100,18 @@ public class NodeHealthChecker {
     if (healthy) {
       if (!status.isUp) {
         logger.info("Node {} is UP (was DOWN for {}ms)", nodeId, now - status.lastDownTime);
+        // Fire the peer-notification hook only on THIS node's own DOWN→UP edge, so a recovered node
+        // announces itself once and the peer re-probes immediately instead of waiting out backoff.
+        if (nodeId.equals(config.getLocalNode().id)) {
+          Runnable hook = onLocalNodeUp;
+          if (hook != null) {
+            try {
+              hook.run();
+            } catch (Exception e) {
+              logger.warn("onLocalNodeUp hook failed for {}: {}", nodeId, e.getMessage());
+            }
+          }
+        }
       }
       status.isUp = true;
       status.lastUpTime = now;
@@ -118,6 +142,22 @@ public class NodeHealthChecker {
       return false;
     }
     return System.currentTimeMillis() - status.lastCheckTime >= status.currentBackoffMs;
+  }
+
+  /**
+   * Collapse a node's exponential backoff so the very next probe is not deferred. Called when the
+   * peer pushes a "I'm back UP" hint: we do NOT trust the hint to flip liveness (that still requires
+   * our own confirmed probe), we only stop waiting out the up-to-60s backoff before re-probing. This
+   * is what turns a ≤60s online-perception lag into ~1 poll cycle.
+   */
+  public void resetBackoff(String nodeId) {
+    NodeStatus status = statusMap.get(nodeId);
+    if (status == null) {
+      return;
+    }
+    status.currentBackoffMs = config.getNodeCheckIntervalMs();
+    status.lastCheckTime = 0;
+    status.consecutiveFailures = 0;
   }
 
   /** TCP-probe the LOCAL node only (loopback, zero cross-node traffic). */

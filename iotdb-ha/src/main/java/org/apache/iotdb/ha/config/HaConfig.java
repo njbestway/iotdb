@@ -60,6 +60,12 @@ public class HaConfig {
   @SerializedName("session")
   private SessionConfig session = new SessionConfig();
 
+  @SerializedName("audit")
+  private AuditConfig audit = new AuditConfig();
+
+  @SerializedName("backlog")
+  private BacklogConfig backlog = new BacklogConfig();
+
   public static HaConfig load(String configPath) throws IOException {
     Path path = Paths.get(configPath);
     logger.info("Loading config from: {}", path.toAbsolutePath());
@@ -134,6 +140,16 @@ public class HaConfig {
     return monitor.remotePipeStatusViaSession;
   }
 
+  /**
+   * Whether this node pushes a one-shot "I'm back UP" hint to the peer the moment its own DataNode
+   * recovers, so the peer collapses its exponential backoff and re-probes within ~1 RTT instead of
+   * waiting out the (up to 60s) backoff window. The hint only accelerates perception — the peer
+   * still confirms liveness with its own probe, so polling remains the correctness baseline.
+   */
+  public boolean isNotifyPeerOnUp() {
+    return monitor.notifyPeerOnUp;
+  }
+
   public int getLagWarningSeconds() {
     return alert.lagWarningSeconds;
   }
@@ -184,6 +200,48 @@ public class HaConfig {
     return recovery.longOfflineThresholdHours;
   }
 
+  /** Whether the monitor may proactively FLUSH the local node to accelerate pipe catch-up. */
+  public boolean isFlushEnabled() {
+    return recovery.flushEnabled;
+  }
+
+  /** Backlog (total remaining events) at or above which a proactive FLUSH is triggered. */
+  public long getFlushRemainingEventsThreshold() {
+    return recovery.flushRemainingEventsThreshold;
+  }
+
+  /** Minimum interval between two proactive FLUSHes on the same node (avoids small-file churn). */
+  public long getFlushCooldownMs() {
+    return parseDuration(recovery.flushCooldown != null ? recovery.flushCooldown : "5m");
+  }
+
+  /**
+   * Catch-up ETA (seconds) at or above which a proactive FLUSH is triggered even if the remaining
+   * event count is below {@link #getFlushRemainingEventsThreshold()}. Sealing active TsFiles lets
+   * the hybrid pipe switch to whole-file batch transfer, shrinking a slow-draining ETA.
+   */
+  public long getFlushEtaSeconds() {
+    return recovery.flushEtaSeconds;
+  }
+
+  /**
+   * Whether a STUCK backlog (RUNNING pipe whose remaining events are not draining) may trigger a
+   * proactive FLUSH. A frozen backlog is the prime candidate for sealing TsFiles to force batch
+   * transfer, so this is on by default.
+   */
+  public boolean isFlushOnStuck() {
+    return recovery.flushOnStuck;
+  }
+
+  /**
+   * Upper bound of the cooldown multiplier applied when consecutive FLUSHes fail to make the backlog
+   * drain (futile backoff). Prevents repeated useless FLUSHes — and the resulting small-file churn —
+   * when sealing TsFiles cannot accelerate catch-up (e.g. a degraded but reachable sink).
+   */
+  public int getFlushFutileBackoffMax() {
+    return recovery.flushFutileBackoffMax > 0 ? recovery.flushFutileBackoffMax : 1;
+  }
+
   public String getHaStatusFilePath() {
     return recovery.haStatusFilePath != null
         ? recovery.haStatusFilePath
@@ -201,6 +259,101 @@ public class HaConfig {
 
   public String getSessionPassword() {
     return session.password;
+  }
+
+  // ── Data audit config ──
+
+  /**
+   * Whether periodic data audit is enabled. Audit compares row counts of every replicated table
+   * between the local (source) node and the remote (target) node and alerts on divergence beyond
+   * tolerance. It should run on the replication SOURCE node only to avoid duplicate reports.
+   */
+  public boolean isAuditEnabled() {
+    return audit.enabled;
+  }
+
+  /** Interval between two data-audit passes. */
+  public long getAuditIntervalMs() {
+    return parseDuration(audit.interval != null ? audit.interval : "10m");
+  }
+
+  /**
+   * Databases to audit. Empty means auto-discover all user databases via {@code SHOW DATABASES}
+   * (system databases such as {@code information_schema} are always excluded).
+   */
+  public List<String> getAuditDatabases() {
+    return audit.databases != null ? audit.databases : new ArrayList<>();
+  }
+
+  /**
+   * Tables to audit within each database. Empty means auto-discover all tables via {@code SHOW
+   * TABLES FROM <db>}.
+   */
+  public List<String> getAuditTables() {
+    return audit.tables != null ? audit.tables : new ArrayList<>();
+  }
+
+  /** Absolute row-count difference tolerated before a WARNING audit alert fires. */
+  public long getAuditRowCountTolerance() {
+    return audit.rowCountTolerance;
+  }
+
+  /** Absolute row-count difference at or above which the audit alert escalates to CRITICAL. */
+  public long getAuditCriticalThreshold() {
+    return audit.criticalThreshold;
+  }
+
+  // ── Pipe backlog alerting config ──
+
+  /**
+   * Whether intelligent pipe-backlog alerting is enabled. Independent of {@code recovery.enabled}
+   * so backlog grading/alerting also works in monitor-only mode.
+   */
+  public boolean isBacklogEnabled() {
+    return backlog.enabled;
+  }
+
+  /** Interval between two backlog-monitor passes. */
+  public long getBacklogIntervalMs() {
+    return parseDuration(backlog.interval != null ? backlog.interval : "15s");
+  }
+
+  /** Remaining-event count at/above which a pipe backlog is graded WARNING. */
+  public long getBacklogWarningEvents() {
+    return backlog.warningRemainingEvents;
+  }
+
+  /** Remaining-event count at/above which a pipe backlog is graded CRITICAL. */
+  public long getBacklogCriticalEvents() {
+    return backlog.criticalRemainingEvents;
+  }
+
+  /** Estimated catch-up seconds at/above which a pipe backlog is graded WARNING. */
+  public long getBacklogWarningEtaSeconds() {
+    return backlog.warningEtaSeconds;
+  }
+
+  /** Estimated catch-up seconds at/above which a pipe backlog is graded CRITICAL. */
+  public long getBacklogCriticalEtaSeconds() {
+    return backlog.criticalEtaSeconds;
+  }
+
+  /**
+   * Window over which a non-draining backlog (remaining not decreasing while RUNNING) is treated as
+   * STUCK and escalated to CRITICAL.
+   */
+  public long getBacklogStuckWindowMs() {
+    return parseDuration(backlog.stuckWindow != null ? backlog.stuckWindow : "3m");
+  }
+
+  /** Assumed sink throughput (events/sec) used to derive an ETA when IoTDB reports none. */
+  public double getBacklogAssumedThroughputEps() {
+    return backlog.assumedThroughputEps > 0 ? backlog.assumedThroughputEps : 10000.0;
+  }
+
+  /** Cooldown between repeated backlog alerts for the same pipe. */
+  public long getBacklogCooldownMs() {
+    return parseDuration(backlog.cooldown != null ? backlog.cooldown : "5m");
   }
 
   private static long parseDuration(String duration) {
@@ -268,6 +421,15 @@ public class HaConfig {
      */
     @SerializedName("remote_pipe_status_via_session")
     public boolean remotePipeStatusViaSession = false;
+
+    /**
+     * When {@code true} (default) a node whose own DataNode just transitioned DOWN→UP pushes a
+     * one-shot hint to the peer's {@code /api/v1/peer-up} so the peer re-probes immediately instead
+     * of waiting out its exponential backoff. Best-effort and fire-and-forget: if the peer is still
+     * unreachable the hint is simply dropped and the normal poll path stays authoritative.
+     */
+    @SerializedName("notify_peer_on_up")
+    public boolean notifyPeerOnUp = true;
   }
 
   public static class AlertConfig {
@@ -315,6 +477,30 @@ public class HaConfig {
 
     @SerializedName("ha_status_file_path")
     public String haStatusFilePath = "data/ha-cluster-status.json";
+
+    /** Proactive FLUSH to seal active TsFiles so hybrid pipes switch to batch transfer. */
+    @SerializedName("flush_enabled")
+    public boolean flushEnabled = true;
+
+    /** Backlog threshold (total remaining events) that triggers a proactive FLUSH. */
+    @SerializedName("flush_remaining_events_threshold")
+    public long flushRemainingEventsThreshold = 10000;
+
+    /** Cooldown between two proactive FLUSHes on the same node. */
+    @SerializedName("flush_cooldown")
+    public String flushCooldown = "5m";
+
+    /** Catch-up ETA (seconds) at/above which a proactive FLUSH is triggered. */
+    @SerializedName("flush_eta_seconds")
+    public long flushEtaSeconds = 600;
+
+    /** Whether a STUCK (non-draining) backlog may trigger a proactive FLUSH. */
+    @SerializedName("flush_on_stuck")
+    public boolean flushOnStuck = true;
+
+    /** Max cooldown multiplier when consecutive FLUSHes fail to drain the backlog. */
+    @SerializedName("flush_futile_backoff_max")
+    public int flushFutileBackoffMax = 8;
   }
 
   public static class SessionConfig {
@@ -323,5 +509,69 @@ public class HaConfig {
 
     @SerializedName("password")
     public String password = "root";
+  }
+
+  public static class AuditConfig {
+    /** Enable periodic data audit. Should be true only on the replication source node. */
+    @SerializedName("enabled")
+    public boolean enabled = false;
+
+    /** Interval between two audit passes. */
+    @SerializedName("interval")
+    public String interval = "10m";
+
+    /** Databases to audit; empty = auto-discover all user databases. */
+    @SerializedName("databases")
+    public List<String> databases = new ArrayList<>();
+
+    /** Tables to audit within each database; empty = auto-discover all tables. */
+    @SerializedName("tables")
+    public List<String> tables = new ArrayList<>();
+
+    /** Row-count difference tolerated before a WARNING fires (absorbs async replication lag). */
+    @SerializedName("row_count_tolerance")
+    public long rowCountTolerance = 0;
+
+    /** Row-count difference at/above which the alert escalates to CRITICAL. */
+    @SerializedName("critical_threshold")
+    public long criticalThreshold = 10000;
+  }
+
+  public static class BacklogConfig {
+    /** Enable intelligent pipe-backlog alerting. */
+    @SerializedName("enabled")
+    public boolean enabled = true;
+
+    /** Interval between two backlog-monitor passes. */
+    @SerializedName("interval")
+    public String interval = "15s";
+
+    /** Remaining events at/above which the backlog is graded WARNING. */
+    @SerializedName("warning_remaining_events")
+    public long warningRemainingEvents = 10000;
+
+    /** Remaining events at/above which the backlog is graded CRITICAL. */
+    @SerializedName("critical_remaining_events")
+    public long criticalRemainingEvents = 500000;
+
+    /** Estimated catch-up seconds at/above which the backlog is graded WARNING. */
+    @SerializedName("warning_eta_seconds")
+    public long warningEtaSeconds = 300;
+
+    /** Estimated catch-up seconds at/above which the backlog is graded CRITICAL. */
+    @SerializedName("critical_eta_seconds")
+    public long criticalEtaSeconds = 3600;
+
+    /** Non-draining backlog lasting this long is treated as STUCK and escalated to CRITICAL. */
+    @SerializedName("stuck_window")
+    public String stuckWindow = "3m";
+
+    /** Assumed sink throughput (events/sec) used to derive an ETA when IoTDB reports none. */
+    @SerializedName("assumed_throughput_eps")
+    public double assumedThroughputEps = 10000.0;
+
+    /** Cooldown between repeated backlog alerts for the same pipe. */
+    @SerializedName("cooldown")
+    public String cooldown = "5m";
   }
 }

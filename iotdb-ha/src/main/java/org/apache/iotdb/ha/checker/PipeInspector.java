@@ -124,6 +124,31 @@ public class PipeInspector {
   }
 
   /**
+   * Force an out-of-band fetch for {@code nodeId}, bypassing the short-TTL cache, and fold the
+   * result into the health state machine exactly like {@link #getPipes} does. Used when the peer
+   * pushes a "I'm back UP" hint: it lets us confirm liveness and refresh pipes within ~1 RTT instead
+   * of serving a stale (DOWN) cached snapshot or waiting for the next scheduled poll. For a REMOTE
+   * node this reuses the same merged HA↔HA HTTP call (pipe status + {@code data_node_up} self-check),
+   * so no extra TCP probe or peer DataNode client borrow is introduced.
+   */
+  public List<PipeInfo> getPipesNow(String nodeId) {
+    HaConfig.NodeConfig nodeConfig = findNode(nodeId);
+    if (nodeConfig == null) {
+      return List.of();
+    }
+    synchronized (lockFor(nodeId)) {
+      List<PipeInfo> fresh = fetchPipes(nodeId, nodeConfig);
+      if (fresh != null) {
+        pipeCache.put(nodeId, new CachedPipes(System.currentTimeMillis(), fresh));
+        return fresh;
+      }
+      // Fetch failed — keep the last known-good snapshot rather than reporting a false empty state.
+      CachedPipes cached = pipeCache.get(nodeId);
+      return cached != null ? cached.pipes : List.of();
+    }
+  }
+
+  /**
    * Fetch pipe status for a node, returning {@code null} when the status could not be obtained so
    * the caller can serve a stale snapshot:
    *

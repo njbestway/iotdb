@@ -20,20 +20,27 @@
 package org.apache.iotdb.ha.api;
 
 import org.apache.iotdb.ha.alert.Alerter;
+import org.apache.iotdb.ha.audit.DataAuditor;
 import org.apache.iotdb.ha.checker.NodeHealthChecker;
 import org.apache.iotdb.ha.checker.PipeInspector;
 import org.apache.iotdb.ha.cluster.ClusterAggregator;
+import org.apache.iotdb.ha.cluster.PeerNotifier;
 import org.apache.iotdb.ha.config.HaConfig;
+import org.apache.iotdb.ha.monitor.BacklogMonitor;
 import org.apache.iotdb.ha.recovery.RecoveryManager;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
@@ -52,8 +59,11 @@ public class ApiServer {
   private final ClusterAggregator clusterAggregator;
   private final Alerter alerter;
   private final RecoveryManager recoveryManager;
+  private final DataAuditor dataAuditor;
+  private final BacklogMonitor backlogMonitor;
   private final PipeInspector pipeInspector;
   private final NodeHealthChecker healthChecker;
+  private final PeerNotifier peerNotifier;
   private HttpServer server;
 
   public ApiServer(
@@ -61,14 +71,20 @@ public class ApiServer {
       ClusterAggregator clusterAggregator,
       Alerter alerter,
       RecoveryManager recoveryManager,
+      DataAuditor dataAuditor,
+      BacklogMonitor backlogMonitor,
       PipeInspector pipeInspector,
-      NodeHealthChecker healthChecker) {
+      NodeHealthChecker healthChecker,
+      PeerNotifier peerNotifier) {
     this.config = config;
     this.clusterAggregator = clusterAggregator;
     this.alerter = alerter;
     this.recoveryManager = recoveryManager;
+    this.dataAuditor = dataAuditor;
+    this.backlogMonitor = backlogMonitor;
     this.pipeInspector = pipeInspector;
     this.healthChecker = healthChecker;
+    this.peerNotifier = peerNotifier;
   }
 
   public void start() throws IOException {
@@ -79,6 +95,9 @@ public class ApiServer {
     server.createContext("/api/v1/alerts", this::handleAlerts);
     server.createContext("/api/v1/health", this::handleHealth);
     server.createContext("/api/v1/recovery", this::handleRecovery);
+    server.createContext("/api/v1/audit", this::handleAudit);
+    server.createContext("/api/v1/backlog", this::handleBacklog);
+    server.createContext("/api/v1/peer-up", this::handlePeerUp);
     server.setExecutor(null);
     server.start();
     logger.info("API server started on port {}", config.getApiPort());
@@ -177,6 +196,81 @@ public class ApiServer {
     }
     String json = GSON.toJson(recoveryManager.getRecoveryStatus());
     sendResponse(exchange, 200, json);
+  }
+
+  /** Returns the most recent data-audit pass: per-table row-count comparison and consistency. */
+  private void handleAudit(HttpExchange exchange) throws IOException {
+    if (!"GET".equals(exchange.getRequestMethod())) {
+      sendResponse(exchange, 405, "{\"error\":\"Method not allowed\"}");
+      return;
+    }
+    if (dataAuditor == null) {
+      sendResponse(exchange, 200, "{\"audit_enabled\":false}");
+      return;
+    }
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("audit_enabled", true);
+    body.put("source_node", config.getLocalNode().id);
+    body.put("target_node", config.getRemoteNode().id);
+    body.put("last_run", dataAuditor.getLastRunIso());
+    body.put("consistent", dataAuditor.isLastRunConsistent());
+    body.put("tables", dataAuditor.getAuditReport());
+    sendResponse(exchange, 200, GSON.toJson(body));
+  }
+
+  /** Returns the most recent pipe-backlog pass: per-pipe severity, remaining, ETA, drain rate. */
+  private void handleBacklog(HttpExchange exchange) throws IOException {
+    if (!"GET".equals(exchange.getRequestMethod())) {
+      sendResponse(exchange, 405, "{\"error\":\"Method not allowed\"}");
+      return;
+    }
+    if (backlogMonitor == null) {
+      sendResponse(exchange, 200, "{\"backlog_enabled\":false}");
+      return;
+    }
+    Map<String, Object> body = new LinkedHashMap<>();
+    body.put("backlog_enabled", true);
+    body.put("last_run", backlogMonitor.getLastRunIso());
+    body.put("worst_severity", backlogMonitor.getWorstSeverity());
+    body.put("pipes", backlogMonitor.getBacklogReport());
+    sendResponse(exchange, 200, GSON.toJson(body));
+  }
+
+  /**
+   * Receive a best-effort "I'm back UP" hint pushed by the peer the moment its DataNode recovers.
+   * The hint is a wake-up signal only: {@link PeerNotifier#onPeerUpAnnounced} collapses our backoff
+   * and triggers an immediate confirming probe — it never flips liveness on the strength of an
+   * inbound packet alone. Reply 200 when accepted, 400 when the claimed node is not our known peer.
+   */
+  private void handlePeerUp(HttpExchange exchange) throws IOException {
+    if (!"POST".equals(exchange.getRequestMethod())) {
+      sendResponse(exchange, 405, "{\"error\":\"Method not allowed\"}");
+      return;
+    }
+    String body;
+    try (InputStream in = exchange.getRequestBody()) {
+      body = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+    }
+    String claimedNode = null;
+    try {
+      JsonObject root = JsonParser.parseString(body).getAsJsonObject();
+      JsonElement n = root.get("node");
+      if (n != null && !n.isJsonNull()) {
+        claimedNode = n.getAsString();
+      }
+    } catch (Exception e) {
+      logger.warn("Malformed peer-up payload: {}", e.getMessage());
+    }
+    if (peerNotifier == null) {
+      sendResponse(exchange, 200, "{\"accepted\":false,\"reason\":\"notifier_disabled\"}");
+      return;
+    }
+    boolean accepted = peerNotifier.onPeerUpAnnounced(claimedNode);
+    if (accepted) {
+      sendResponse(exchange, 200, "{\"accepted\":true,\"node\":\"" + claimedNode + "\"}");
+    } else {
+      sendResponse(exchange, 400, "{\"accepted\":false,\"reason\":\"unknown_node\"}");
+    }
   }
 
   private void sendResponse(HttpExchange exchange, int code, String body) throws IOException {
