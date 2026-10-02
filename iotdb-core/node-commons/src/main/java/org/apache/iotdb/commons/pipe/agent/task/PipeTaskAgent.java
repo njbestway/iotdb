@@ -122,7 +122,14 @@ public abstract class PipeTaskAgent {
       return pipeMetaKeeper.tryReadLock(timeOutInSeconds);
     } catch (final InterruptedException e) {
       Thread.currentThread().interrupt();
-      LOGGER.warn(PipeMessages.INTERRUPTED_ACQUIRING_READ_LOCK, e);
+      // During node shutdown the RPC/worker thread pools are interrupted on purpose, so an
+      // in-flight pipe meta read (e.g. a peer's pipeHeartbeat) being interrupted is expected and
+      // benign. Downgrade to DEBUG then to avoid a scary WARN+stacktrace; keep WARN otherwise.
+      if (CommonDescriptor.getInstance().getConfig().isStopping()) {
+        LOGGER.debug(PipeMessages.INTERRUPTED_ACQUIRING_READ_LOCK, e);
+      } else {
+        LOGGER.warn(PipeMessages.INTERRUPTED_ACQUIRING_READ_LOCK, e);
+      }
       return false;
     }
   }
@@ -144,7 +151,13 @@ public abstract class PipeTaskAgent {
       return pipeMetaKeeper.tryWriteLock(timeOutInSeconds);
     } catch (final InterruptedException e) {
       Thread.currentThread().interrupt();
-      LOGGER.warn(PipeMessages.INTERRUPTED_ACQUIRING_WRITE_LOCK, e);
+      // Symmetric to tryReadLockWithTimeOut: an interrupt while acquiring the write lock during
+      // node shutdown is expected (thread pools are torn down on purpose), so keep it at DEBUG.
+      if (CommonDescriptor.getInstance().getConfig().isStopping()) {
+        LOGGER.debug(PipeMessages.INTERRUPTED_ACQUIRING_WRITE_LOCK, e);
+      } else {
+        LOGGER.warn(PipeMessages.INTERRUPTED_ACQUIRING_WRITE_LOCK, e);
+      }
       return false;
     }
   }
