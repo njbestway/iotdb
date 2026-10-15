@@ -1081,8 +1081,7 @@ public final class DataNodeMiscMessages {
   public static final String MISC_LOG_DATANODE_EXITS_JVM_MEMORY_USAGE_BE69D1F5 =
       "DataNode exits. Jvm memory usage: {}";
   public static final String MISC_LOG_FAILED_TO_REPORT_DATANODE_S_SHUTDOWN_TO_CONFIGNODE_THE_CLUSTER_E6727497 =
-      "Failed to report DataNode's shutdown to ConfigNode. The cluster will still take the current "
-          + "DataNode as Running for a few seconds.";
+      "Failed to confirm the DataNode shutdown report with the ConfigNode leader.";
   public static final String MISC_LOG_SKIPPING_DATANODE_SHUTDOWN_REPORT_IN_MERGED_EDGE_NODE_9C1F2A7B =
       "Skipping DataNode shutdown report to ConfigNode: running in merged EdgeNode mode, where the "
           + "ConfigNode shares this JVM and is shutting down concurrently.";

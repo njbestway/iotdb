@@ -1080,7 +1080,7 @@ public final class DataNodeMiscMessages {
   public static final String MISC_LOG_DATANODE_EXITS_JVM_MEMORY_USAGE_BE69D1F5 =
       "DataNode 退出。JVM 内存使用情况：{}";
   public static final String MISC_LOG_FAILED_TO_REPORT_DATANODE_S_SHUTDOWN_TO_CONFIGNODE_THE_CLUSTER_E6727497 =
-      "无法向 ConfigNode 上报 DataNode 关闭状态。集群在接下来的几秒内仍会将当前 DataNode 视为 Running。";
+      "未能获得 ConfigNode leader 对 DataNode 关闭报告的确认。";
   public static final String MISC_LOG_SKIPPING_DATANODE_SHUTDOWN_REPORT_IN_MERGED_EDGE_NODE_9C1F2A7B =
       "跳过向 ConfigNode 上报 DataNode 关闭：当前为 EdgeNode 合并模式，ConfigNode 与本进程同 JVM 且正在并发关闭。";
   public static final String MISC_LOG_SOMETHING_WRONG_HAPPENED_WHILE_CALLING_CONSENSUS_LAYER_S_8B8FBB16 =
