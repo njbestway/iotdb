@@ -20,6 +20,10 @@
 package org.apache.iotdb.db.i18n;
 
 public final class DataNodeQueryMessages {
+  public static final String EXCEPTION_QUERY_CHUNK_RESOURCES_ARE_ALREADY_CLOSED_CA6A0559 =
+      "查询 Chunk 资源已关闭";
+  public static final String LOG_FAILED_TO_RELEASE_QUERY_CHUNK_RESOURCES_91573FE5 =
+      "释放查询 Chunk 资源失败";
   public static final String EXCEPTION_FAILED_TO_CONVERT_TSFILE_ARG_TO_TABLETS_STATUS_ARG_E7C9F477 =
       "将 TsFile %s 转换为 tablet 失败。状态：%s";
   public static final String EXCEPTION_FAILED_TO_CONVERT_TSFILE_ARG_TO_TABLETS_ARG_96358FDD =
@@ -1658,6 +1662,8 @@ public final class DataNodeQueryMessages {
       "[清理查询]";
   public static final String RELEASE_QUERY_RESOURCE_STATE =
       "[释放查询资源] 状态为: {}";
+  public static final String IGNORE_EXCEPTION_AFTER_QUERY_DONE =
+      "[忽略异常] 查询 {} 已处于终态 {}，忽略并发清理资源导致的异常";
   public static final String SKIP_EXECUTE =
       "[跳过执行]";
   public static final String SKIP_EXECUTE_AFTER_LOGICAL_PLAN =

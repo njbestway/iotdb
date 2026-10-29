@@ -20,6 +20,10 @@
 package org.apache.iotdb.db.i18n;
 
 public final class DataNodeQueryMessages {
+  public static final String EXCEPTION_QUERY_CHUNK_RESOURCES_ARE_ALREADY_CLOSED_CA6A0559 =
+      "Query chunk resources are already closed";
+  public static final String LOG_FAILED_TO_RELEASE_QUERY_CHUNK_RESOURCES_91573FE5 =
+      "Failed to release query chunk resources";
   public static final String EXCEPTION_FAILED_TO_CONVERT_TSFILE_ARG_TO_TABLETS_STATUS_ARG_E7C9F477 =
       "Failed to convert TsFile %s to tablets. Status: %s";
   public static final String EXCEPTION_FAILED_TO_CONVERT_TSFILE_ARG_TO_TABLETS_ARG_96358FDD =
@@ -1678,6 +1682,9 @@ public final class DataNodeQueryMessages {
       "[CleanUpQuery]]";
   public static final String RELEASE_QUERY_RESOURCE_STATE =
       "[ReleaseQueryResource] state is: {}";
+  public static final String IGNORE_EXCEPTION_AFTER_QUERY_DONE =
+      "[IgnoreException] Query {} is already in terminal state {}, the exception caused by "
+          + "concurrent resource cleanup is ignored";
   public static final String SKIP_EXECUTE =
       "[SkipExecute]";
   public static final String SKIP_EXECUTE_AFTER_LOGICAL_PLAN =
